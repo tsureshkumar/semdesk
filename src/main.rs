@@ -1,51 +1,99 @@
-use rust_bert::pipelines::question_answering::{QuestionAnsweringModel, QaInput};
+// Copyright: (c) 2023 Sureshkumar T
+// License: Apache-2.0
+
+mod settings;
+mod crawler;
 mod indexer;
-use indexer::Indexer;
+mod idgenerator;
+mod query_processor;
+mod retriever;
+mod catalog;
+mod parsers;
+mod error;
+
+
+
+use rust_bert::pipelines::question_answering::{QuestionAnsweringModel, QaInput};
 use pdf_extract;
-use std::collections::HashSet;
+use std::thread;
+use std::sync::mpsc::{Sender, Receiver, channel};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use ndarray::prelude::*;
+use ndarray::{Array, Array1, Axis};
+use env_logger;
+use tracing;
+use tracing::{info, Level};
+use tracing_subscriber;
+use which::which;
 
 
-fn runqa(qa_model: &QuestionAnsweringModel, context: &str, question: &str) {
+use indexer::{Indexer, IndexerImpl};
+use settings::get_config;
+use crawler::{Crawler, CrawlerImpl};
+use query_processor::{QueryProcessor, QueryProcessorImpl};
+use retriever::{Retriever, RetrieverImpl};
+use catalog::Catalog;
 
-
-    let question = String::from(question);
-    let context = String::from(context);
-
-    let answers = qa_model.predict(&[QaInput { question, context }], 3, 32);
-    println!("{:?}", answers);
-}
-
-// write a function to parse a pdf and return a string
-fn parse_pdf(filename: String) -> String {
-    let out = pdf_extract::extract_text(filename).unwrap();
-    out
+fn warmup() {
+    // remove unix socket file
+    let _ = std::fs::remove_file(settings::get_socket_path());
+    let _ = std::fs::create_dir_all(settings::get_config_dir());
+    // check for binary runtime dependencies
+    let binaries = vec!["pdf2ps", "ps2ascii"];
+    for bin in binaries {
+        let bin_path = which::which(bin);
+        match bin_path {
+            Ok(_) => {
+                tracing::info!("{} found", bin);
+            },
+            Err(_) => {
+                tracing::warn!("{} not found", bin);
+            }
+        }
+    }
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let question = &args[1];
-    println!("Question: {}", question);
+    tracing_subscriber::fmt().with_thread_ids(true)
+        .with_max_level(Level::DEBUG)
+        .init();
+    tracing::debug!("{:}", get_config().files.join(", "));
 
-    let mut indexer = indexer::IndexerImpl::new();
+    warmup();
 
-    let binding = parse_pdf(String::from("resume.pdf"));
-    let context = binding.as_str();
-    indexer.add_document(context, "my data");
+    let catalog = Catalog::new();
+    let arc_catalog = Arc::new(catalog);
 
-    indexer.add_document("Paris is capital of France.", "cap1");
-    indexer.add_document("Delhi is capital of India.", "cap2");
-    let res = indexer.retrieve_document(question);
-    let mut text = String::new();
-    let mut sources = HashSet::new();
-    for i in res {
-        text.push_str(i.text.as_str());
-        sources.insert(i.loc);
-    }
+    let mut indexer = IndexerImpl::new(idgenerator::IdGenerator::new(arc_catalog.clone()));
+    let idx_adder_ch = indexer.get_adder();
+    let idx_query_ch = indexer.get_retriever();
+    let mut file_crawler = CrawlerImpl::new(arc_catalog.clone(), idx_adder_ch);
 
-    let qa_model = QuestionAnsweringModel::new(Default::default()).unwrap();
-    let answer = runqa(&qa_model, &text, question);
-    println!("answer: {:?} sources: {:?}", answer, sources);
+    let thr1 = thread::spawn(move || {
+        file_crawler.run();
+    });
 
-    // wait until Ctrl-C is pressed
-    std::thread::park();
+    let thr2 = thread::spawn(move || {
+        indexer.run();
+    });
+
+    let mut retriever_obj: RetrieverImpl = Retriever::new(arc_catalog.clone(), idx_query_ch);
+    let retriever_ch = retriever_obj.get_sender();
+
+    let thr4 = thread::spawn(move || {
+        retriever_obj.run();
+    });
+
+    let mut query_processor: QueryProcessorImpl = QueryProcessor::new(retriever_ch);
+    let query_ch = query_processor.get_query_channel();
+    let thr3 = thread::spawn(move || {
+        query_processor.run();
+    });
+
+    thr1.join().unwrap();
+    thr2.join().unwrap();
+    thr3.join().unwrap();
+    thr4.join().unwrap();
 }

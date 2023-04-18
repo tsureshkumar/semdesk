@@ -1,0 +1,3 @@
+[build]
+rustflags = ["-L", "/Users/tsureshkumar/go/src/github.com/tsureshkumar/semdesk", "-Awarnings"]
+

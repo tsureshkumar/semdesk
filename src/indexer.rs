@@ -1,3 +1,7 @@
+// Copyright: (c) 2023 Sureshkumar T
+// License: Apache-2.0
+
+
 use faiss::{ index_factory, MetricType};
 use faiss::index::IndexImpl;
 use faiss::Index;
@@ -9,7 +13,18 @@ use sha256;
 use faiss::Idx;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::mpsc::{Sender, Receiver, channel};
+use std::sync::Arc;
+use ndarray::prelude::*;
+use ndarray::{Array, Array1, Array2, ArrayView1, ArrayView2, Axis};
+use std::time::Duration;
+use std::thread;
 
+use crate::idgenerator::IdGenerator;
+use crate::catalog::Catalog;
+
+
+#[link(name = "faiss")]
 extern "C" {
     #[doc = " L2-renormalize a set of vector. Nothing done if the vector is 0-normed"]
     pub fn faiss_fvec_renorm_L2(d: usize, nx: usize, x: *mut f32);
@@ -22,84 +37,112 @@ pub fn renorm_L2(d: usize, nx: usize, x: *mut f32) {
 }
 
 #[derive(Debug)]
-#[derive(Clone)]
-pub struct DocResult {
-    id: String,
-    pub loc: String,
-    pub text: String,
-    pub score: f32,
+pub enum Message {
+    AddDocument(String, u64, String, Sender<Reply>),
+    RetrieveDocument(String, Sender<Reply>),
 }
 
-impl DocResult {
-    fn new(id: String, loc: String, text: String, score: f32) -> Self {
-        DocResult {
-            id,
-            loc,
-            text,
-            score,
-        }
-    }
+pub enum Reply {
+    Done(String, Vec<u64>),
+    Docs(Vec<(u64, f32)>),
 }
-
-impl std::fmt::Display for DocResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "id: {}, loc: {}, text: {}, score: {}", self.id, self.loc, self.text, self.score)
-    }
-}
-
 
 pub trait Indexer {
-    fn add_document(&mut self, document: &str, loc: &str);
-    fn retrieve_document(&mut self, query: &str) -> Vec<DocResult>;
-    fn persist_index(&self);
+    fn add_document(&mut self, document: String, docid: u64, loc: String) -> Vec<u64>;
+    fn retrieve_document(&mut self, query: &str) -> Vec<(u64, f32)>;
+    fn run(&mut self);
+}
+
+fn get_index_location() -> String {
+    let user_dir = dirs::home_dir().unwrap();
+    let index_dir = user_dir.join(".cache/semdesk/.indexer");
+    index_dir.to_str().unwrap().to_string()
 }
 
 pub struct IndexerImpl {
     index: IndexImpl,
-    map: HashMap<String, DocResult>,
-    last_id: u64,
     model: SentenceEmbeddingsModel,
     token_size: usize,
+    adder_channel: (Sender<Message>, Receiver<Message>),
+    retriever_channel: (Sender<Message>, Receiver<Message>),
+    id_gen: IdGenerator,
+    muted: bool,
 }
 
 impl IndexerImpl {
-    pub fn new() -> Self {
-        //let index = index_factory(self.token_size, "Flat", MetricType::L2).unwrap();
+    pub fn new(id_gen: IdGenerator) -> Self {
         let token_size = 384;
-        let index = index_factory(token_size, "IDMap,Flat", MetricType::InnerProduct).unwrap();
+        let mut index = index_factory(token_size, "IDMap,Flat", MetricType::InnerProduct).unwrap();
         let model = SentenceEmbeddingsBuilder::remote(
              SentenceEmbeddingsModelType::AllMiniLmL6V2,
          ).create_model().unwrap();
+        let index_location = get_index_location();
+        if std::path::Path::new(&index_location).exists() {
+            log::debug!("Loading index from {}", index_location);
+            index = faiss::read_index(&index_location).unwrap();
+            log::debug!("Loaded index {}", index.ntotal());
+        }
         IndexerImpl {
             index,
             model,
-            map: HashMap::new(),
-            last_id: 0,
             token_size: token_size as usize,
+            adder_channel: channel(),
+            retriever_channel: channel(),
+            id_gen,
+            muted: false,
         }
     }
+
+    pub fn get_adder(&self) -> Sender<Message> {
+        self.adder_channel.0.clone()
+    }
+
+    pub fn get_retriever(&self) -> Sender<Message> {
+        self.retriever_channel.0.clone()
+    }
+
 }
 
 impl Indexer for IndexerImpl {
-    fn add_document(&mut self, document: &str, loc: &str) {
-        let id = sha256::digest(document.as_bytes());
+    fn add_document(&mut self, document: String, docid1:u64, loc: String) -> Vec<u64> {
         // chunk the document into self.token_size byte chunks with padding if less
-        let chunks = document.as_bytes().chunks(self.token_size).map(|c| String::from_utf8(c.to_vec()).unwrap()).collect::<Vec<String>>();
-        let tokens = self.model.encode(&chunks).unwrap();
+        let chunks = document.as_bytes().chunks(self.token_size).map(|c| 
+                                         String::from_utf8(c.to_vec())
+                                         .unwrap_or(String::from(""))
+                                         ).collect::<Vec<String>>();
+        let mut input = Vec::new();
+        for chunk in chunks.iter() {
+            let chunk = chunk.trim();
+            if chunk.len() > 0 {
+                input.push(chunk);
+            }
+        }
+        if chunks.len() == 0 || input.len() == 0 {
+            log::debug!("No input for document {}", loc);
+            return Vec::new();
+        }
+        let tokens = self.model.encode(&input).unwrap();
+        let mut ids = Vec::new();
         for i in 0..tokens.len() {
             let mut token = tokens[i].clone();
+            log::debug!("Token size {}/{}", token.len(), self.token_size);
             if token.len() < self.token_size {
+                log::debug!("Resizing");
                 token.resize(self.token_size, 0.0);
             }
             renorm_L2(self.token_size, 1, token.as_mut_ptr());
-            //self.index.add(&token).unwrap();
-            self.map.insert(self.last_id.to_string(), DocResult::new(id.to_string(), loc.to_string(), chunks[i].clone(), 0.0)); 
-            let idx = Idx::new(self.last_id);
+            let docid = self.id_gen.next();
+            ids.push(docid);
+            log::debug!("Adding document {} ", docid);
+            let idx = Idx::new(docid);
             self.index.add_with_ids(&token, &[idx]).unwrap();
-            self.last_id += 1;
+            self.muted = true;
         }
+        log::debug!("Done indexing document {} ", loc);
+        ids
     }
-    fn retrieve_document(&mut self, query: &str) -> Vec<DocResult>{
+    fn retrieve_document(&mut self, query: &str) -> Vec<(u64, f32)> {
+        log::debug!("Query {} total_indexes: {}", query, self.index.ntotal());
         let tokens = self.model.encode(&[String::from(query)]).unwrap();
         let mut token = tokens[0].clone();
         if tokens.len() < self.token_size {
@@ -107,21 +150,55 @@ impl Indexer for IndexerImpl {
         }
         renorm_L2(self.token_size, 1, token.as_mut_ptr());
         let res = self.index.search(&token, 6).unwrap();
-        let mut docs = Vec::new();
+        let mut docs: Vec<(u64, f32)> = Vec::new();
         for (dist, label) in res.distances.iter().zip(res.labels.iter()) {
+            log::debug!("Dist {} Label {}", dist, label);
             if dist < &0.10 {
                 continue;
             }
             let id = label;
-            if id.is_none()  || id.get() >= Some(self.index.ntotal()) {
+            if id.is_none() {
                 continue;
             }
-            let mut ret: DocResult =  self.map.get(&id.get().unwrap().to_string()).unwrap().clone();
-            ret.score = *dist;
-            docs.push(ret.clone());
+            docs.push((id.get().unwrap(), dist.clone()));
         }
         docs
     }
-    fn persist_index(&self) {
+    fn run(&mut self) {
+        let mut counter = 0;
+        loop {
+            while let Ok(msg) = self.retriever_channel.1.try_recv() {
+                match msg {
+                    Message::RetrieveDocument(query, tx) => {
+                        log::debug!("Retrieving document {} ", query);
+                        let docs = self.retrieve_document(&query);
+                        tx.send(Reply::Docs(docs)).unwrap();
+                    }
+                    _ => { break; }
+                }
+            }
+
+            if let Ok(msg) = self.adder_channel.1.try_recv() {
+                match msg {
+                    Message::AddDocument(doc, id, loc, tx) => {
+                        log::debug!("Received Indexing document {} ", loc);
+                        let ids = self.add_document(doc, id, loc.clone());
+                        tx.send(Reply::Done(loc.clone(), ids)).unwrap();
+                    }
+                    _ => {}
+                }
+            }
+
+            if counter % 2000 == 0  && self.muted {
+                let index_location = get_index_location();
+                log::debug!("Writing index to {}", index_location);
+                faiss::write_index(&self.index, index_location).unwrap();
+                counter = 0;
+                self.muted = false;
+            }
+            counter += 100;
+
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 }
