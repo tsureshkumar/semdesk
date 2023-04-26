@@ -9,6 +9,8 @@ have $5000.", you can ask "How much do I have in my bank?".  This tool will
 answer that "$5000", where as non-semantic search will return if there is a
 keyword match in the file name.
 
+![](https://raw.githubusercontent.com/tsureshkumar/semdesk/gh-pages/doc-assets/images/demo1.gif)
+
 Currently, this tool works with text files and some level of functionality with 
 PDF files. PDF files are hard to parse for text as the flow may not be linear.
 
