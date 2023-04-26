@@ -121,6 +121,13 @@ impl Indexer for IndexerImpl {
             log::debug!("No input for document {}", loc);
             return Vec::new();
         }
+        println!("Input size {} Chunk size {}", input.len(), chunks.len());
+        // chunks of length greater than  ~50 takes a hell lot of memory if we give all of them at
+        // one go.  We can throttle with few sentences each time. But that increases cpu time.
+        // Hence, let's truncate a large file at loss of information
+        if input.len() > 50 {
+            input.truncate(50);
+        }
         let tokens = self.model.encode(&input).unwrap();
         let mut ids = Vec::new();
         for i in 0..tokens.len() {
@@ -192,9 +199,21 @@ impl Indexer for IndexerImpl {
             if counter % 2000 == 0  && self.muted {
                 let index_location = get_index_location();
                 log::debug!("Writing index to {}", index_location);
+                
+                // backup the current index file before overwriting.  Always keep only two copies.
+                if std::path::Path::new(&index_location).exists() {
+                    let backup_location = format!("{}.bak", index_location);
+                    if std::path::Path::new(&backup_location).exists() {
+                        std::fs::remove_file(&backup_location).unwrap();
+                    }
+                    std::fs::rename(&index_location, &backup_location).unwrap();
+                }
+
                 faiss::write_index(&self.index, index_location).unwrap();
+
                 counter = 0;
                 self.muted = false;
+                log::debug!("Done writing index");
             }
             counter += 100;
 

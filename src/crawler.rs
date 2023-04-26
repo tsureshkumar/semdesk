@@ -43,6 +43,17 @@ impl CrawlerImpl {
             return;
         }
         if PathBuf::from(&filename).is_file() {
+            // don't index if size is greater than 10 MB
+            let metadata = std::fs::metadata(&filename).unwrap();
+            if metadata.len() > 10 * 1024 * 1024 {
+                return;
+            }
+
+            // don't index if file is hidden
+            if filename.starts_with(".") {
+                return;
+            }
+            
             log::debug!("Indexing: {}", filename);
             let content: Result<String, Box<dyn StdError>> = Parser::new().parse(&filename);
             if let Err(e) = content {

@@ -44,3 +44,4 @@ tracing-subscriber = "0.3.17"
 which = "4.4.0"
 clap = { version = "4.2.4", features = ["derive"] }
 chrono = "0.4.24"
+nnsplit = "0.5.9"
