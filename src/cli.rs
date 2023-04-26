@@ -2,6 +2,10 @@
 // License: Apache-2.0
 
 mod settings;
+mod error;
+mod indexer;
+mod idgenerator;
+mod catalog;
 
 use clap;
 use clap::{Arg, Parser, Subcommand, ArgMatches};
@@ -12,11 +16,14 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::os::unix::net::UnixStream;
+use std::sync::Arc;
 
 use tracing;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber;
 use tracing::Level as LogLevel;
+
+use indexer::Indexer;
 
 #[derive(Parser, Debug)]
 #[command(name = "semdesk-cli")]
@@ -34,6 +41,12 @@ enum Commands {
     Query {
         #[arg(required = true)]
         query: String,
+    },
+
+    #[command(name = "add")]
+    AddDocument {
+        #[arg(required = true)]
+        location: String,
     },
 }
 
@@ -98,6 +111,19 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
         },
+        Commands::AddDocument { location } => {
+            tracing::warn!("this command is only for testing");
+            let catalog = catalog::Catalog::new();
+            let arc_catalog = Arc::new(catalog);
+            let mut ind: indexer::IndexerImpl = indexer::IndexerImpl::new(idgenerator::IdGenerator::new(arc_catalog.clone()));
+            let mut file = File::open(location.clone())?;
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            ind.add_document(contents, 0, location);
+            // wait for user input to exit
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+        }
     }
     Ok(())
 }
