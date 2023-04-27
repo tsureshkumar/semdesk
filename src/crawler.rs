@@ -36,7 +36,7 @@ impl CrawlerImpl {
     }
 
     fn scan_file(&self, filename: String, depth: u32) {
-        if depth > settings::get_config().max_scan_depth {
+        if depth > settings::get_config(None).max_scan_depth {
             return;
         }
         if self.is_file_indexed(filename.clone()) {
@@ -50,7 +50,9 @@ impl CrawlerImpl {
             }
 
             // don't index if file is hidden
-            if filename.starts_with(".") {
+            // take the filename part from the path
+            let filenameonly = PathBuf::from(&filename).file_name().unwrap().to_str().unwrap().to_string();
+            if filenameonly.starts_with(".") {
                 return;
             }
             
@@ -93,7 +95,7 @@ impl Crawler for CrawlerImpl {
     }
 
     fn scan(&self) {
-        let files = settings::get_config().files.clone();
+        let files = settings::get_config(None).files.clone();
         for filename in files {
             let mut fname = filename.clone();
             if fname.starts_with("~") {

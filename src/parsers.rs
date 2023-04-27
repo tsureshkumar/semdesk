@@ -9,6 +9,8 @@ use std::process::Command;
 use std::process::Stdio;
 use mime_guess;
 
+use pdf_extract;
+
 use crate::error::{FileNotFoundError, UnsupportedFileTypeError};
 
 pub struct Parser {

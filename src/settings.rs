@@ -12,8 +12,27 @@ pub struct Settings {
     pub files: Vec<String>,
     pub max_scan_depth: u32,
     pub db_dir: String,
-    pub scan_status_file: &'static str,
+    pub scan_status_file: String,
+    pub index_location: String,
 }
+
+pub struct LocalModeSettings {
+    db_dir: String,
+    local_mode: bool,
+    verbose: bool,
+    max_scan_depth: u32,
+}
+impl LocalModeSettings {
+    pub fn new(db_dir: String, local_mode: bool, verbose: bool, max_scan_depth: u32) -> Self {
+        LocalModeSettings {
+            db_dir,
+            local_mode,
+            verbose,
+            max_scan_depth,
+        }
+    }
+}
+
 
 impl Default for Settings {
     fn default() -> Self {
@@ -21,7 +40,8 @@ impl Default for Settings {
             files: vec![],
             max_scan_depth: 2,
             db_dir: String::from("~/.local/share/semdesk/db"),
-            scan_status_file: "~/.local/share/semdesk/scan_status.txt",
+            scan_status_file: String::from("~/.local/share/semdesk/scan_status.txt"),
+            index_location: String::from("~/.cache/semdesk/.index"),
         }
     }
 }
@@ -33,7 +53,7 @@ pub fn get_config_dir() -> String {
 }
 
 pub fn get_db_dir() -> String {
-    let dir = CONFIG.db_dir.clone();
+    let dir = get_config(None).db_dir.clone();
     if dir.starts_with("~") {
         let home = dirs::home_dir().unwrap();
         let db_dir = home.join(&dir[2..]);
@@ -55,23 +75,40 @@ impl Settings {
             let max_scan_depth: u32 = config.get("crawler.max_scan_depth").unwrap_or(2);
             let db_dir: String = config.get("db.dir").unwrap_or(String::from("~/.local/share/semdesk/db"));
             let scan_status_file = config.get("crawler.scan_status_file").unwrap_or("~/.local/share/semdesk/scan_status.txt");
-            Ok(Settings { files, max_scan_depth, db_dir, scan_status_file })
+            let index_location = config.get("index.location").unwrap_or("~/.cache/semdesk/.index");
+            Ok(Settings { files, max_scan_depth, db_dir, scan_status_file: scan_status_file.to_string(), index_location: index_location.to_string() })
         } else {
             Ok(Settings::default())
         }
     }
 }
 
-lazy_static! {
-    pub static ref CONFIG: Settings = Settings::new().unwrap();
-}
+static mut CONFIG: Option<Settings> = None;
+static once : std::sync::Once = std::sync::Once::new();
 
-pub fn get_config() -> &'static Settings {
-    &CONFIG
+
+pub fn get_config(local_mode: Option<LocalModeSettings>) -> &'static Settings {
+    unsafe {
+        once.call_once(|| {
+            if local_mode.is_some() {
+                let local_mode = local_mode.unwrap();
+                CONFIG = Some(Settings {
+                    files: vec![local_mode.db_dir.clone()],
+                    max_scan_depth: local_mode.max_scan_depth,
+                    db_dir: PathBuf::from(local_mode.db_dir.clone()).join(".semdesk_db").to_str().unwrap().to_string(),
+                    scan_status_file: PathBuf::from(local_mode.db_dir.clone()).join(".semdesk_scan_status.txt").to_str().unwrap().to_string(),
+                    index_location: PathBuf::from(local_mode.db_dir.clone()).join(".semdesk_index").to_str().unwrap().to_string(),
+                });
+            } else {
+                CONFIG = Some(Settings::new().unwrap());
+            }
+        });
+        CONFIG.as_ref().unwrap()
+    }
 }
 
 pub fn get_scan_status_file() -> String {
-    let file = CONFIG.scan_status_file.clone();
+    let file = get_config(None).scan_status_file.clone();
     if file.starts_with("~") {
         let home = dirs::home_dir().unwrap();
         let scan_status_file = home.join(&file[2..]);
@@ -86,4 +123,9 @@ pub fn get_socket_path() -> String {
     let userdir = dirs::home_dir().unwrap();
     let sock_path = userdir.join(".local/share/semdesk.sock");
     sock_path.to_str().unwrap().to_string()
+}
+
+pub fn get_index_location() -> String {
+    let conf = get_config(None);
+    return conf.index_location.clone();
 }

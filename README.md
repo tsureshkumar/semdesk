@@ -17,6 +17,9 @@ PDF files. PDF files are hard to parse for text as the flow may not be linear.
 This uses facebook's faiss vector index for document retrieval and google's bert
 model for question-answering.
 
+There could be other usecases such as when you through a set of files into the
+index from a directory, you can ask the tool questions from those set of files.
+
 # Building
 
 Currently, the tool works on MacOS only.

@@ -28,6 +28,9 @@ use tracing::{info, Level};
 use tracing_subscriber;
 use which::which;
 
+use clap;
+use clap::{Arg, Parser, Subcommand, ArgMatches};
+
 
 use indexer::{Indexer, IndexerImpl};
 use settings::get_config;
@@ -55,11 +58,40 @@ fn warmup() {
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "semdesk")]
+struct Tool {
+    #[arg(short, long)]
+    local: bool,
+
+    #[arg(short, long)]
+    dir: Option<String>,
+
+    #[arg(short, long)]
+    verbose: bool
+}
+
 fn main() {
+    let cli = Tool::parse();
     tracing_subscriber::fmt().with_thread_ids(true)
-        .with_max_level(Level::DEBUG)
+        .with_max_level(match cli.verbose {
+            true => Level::TRACE,
+            _ => Level::INFO,
+        })
         .init();
-    tracing::debug!("{:}", get_config().files.join(", "));
+
+
+    match cli.local {
+        true =>  {
+            info!("Running in local mode");
+            settings::get_config(Some(settings::LocalModeSettings::new(cli.dir.unwrap(), cli.local, cli.verbose, 2)));
+        }
+        _ =>
+        {
+            info!("Running in server mode");
+            settings::get_config(None);
+        }
+    }
 
     warmup();
 

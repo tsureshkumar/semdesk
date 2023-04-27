@@ -20,6 +20,7 @@ use ndarray::{Array, Array1, Array2, ArrayView1, ArrayView2, Axis};
 use std::time::Duration;
 use std::thread;
 
+use crate::settings;
 use crate::idgenerator::IdGenerator;
 use crate::catalog::Catalog;
 
@@ -53,11 +54,6 @@ pub trait Indexer {
     fn run(&mut self);
 }
 
-fn get_index_location() -> String {
-    let user_dir = dirs::home_dir().unwrap();
-    let index_dir = user_dir.join(".cache/semdesk/.indexer");
-    index_dir.to_str().unwrap().to_string()
-}
 
 pub struct IndexerImpl {
     index: IndexImpl,
@@ -76,7 +72,7 @@ impl IndexerImpl {
         let model = SentenceEmbeddingsBuilder::remote(
              SentenceEmbeddingsModelType::AllMiniLmL6V2,
          ).create_model().unwrap();
-        let index_location = get_index_location();
+        let index_location = settings::get_index_location();
         if std::path::Path::new(&index_location).exists() {
             log::debug!("Loading index from {}", index_location);
             index = faiss::read_index(&index_location).unwrap();
@@ -197,7 +193,7 @@ impl Indexer for IndexerImpl {
             }
 
             if counter % 2000 == 0  && self.muted {
-                let index_location = get_index_location();
+                let index_location = settings::get_index_location();
                 log::debug!("Writing index to {}", index_location);
                 
                 // backup the current index file before overwriting.  Always keep only two copies.
